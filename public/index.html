@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#080808">
+  <meta name="description" content="Bot Alyz Web. Automasi WhatsApp premium dengan pairing code tanpa QR.">
+  <title>Bot Alyz Web - Automasi WhatsApp Premium</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111111'/%3E%3Cpath d='M16 6l9 20h-4l-2-5h-6l-2 5H7z' fill='%23C0C0C0'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="bg" aria-hidden="true">
+    <span class="blob blob-1"></span>
+    <span class="blob blob-2"></span>
+    <span class="blob blob-3"></span>
+    <span class="halftone"></span>
+  </div>
+
+  <header class="navbar">
+    <a class="brand" href="/" aria-label="AlyzBot beranda">
+      <span class="brand-mark" aria-hidden="true">A</span>
+      <span class="brand-name">AlyzBot</span>
+    </a>
+    <div class="status" id="status" data-state="online" role="status">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span id="status-text">Online</span>
+    </div>
+  </header>
+
+  <main class="stage">
+    <!-- Step 1: Landing intro -->
+    <section id="step-intro" class="step is-active" aria-labelledby="hero-title">
+      <div class="hero">
+        <h1 id="hero-title" class="chrome-title">Bot Alyz Web</h1>
+        <p class="subtitle">Automasi WhatsApp premium pairing tercepat tanpa QR</p>
+
+        <ul class="badges" aria-label="Keunggulan">
+          <li>No QR</li>
+          <li>Pairing Code</li>
+          <li>100% Aman</li>
+        </ul>
+
+        <p class="intro">
+          Hubungkan nomor WhatsApp kamu dan bot langsung aktif dengan sticker, brat,
+          hapus background, sambutan member, dan banyak lagi. Setiap nomor punya sesi
+          sendiri, terpisah dari pengguna lain.
+        </p>
+
+        <button type="button" id="btn-start" class="btn btn-silver btn-xl">Mulai Bot</button>
+      </div>
+    </section>
+
+    <!-- Step 2: Pairing -->
+    <section id="step-pair" class="step" aria-labelledby="pair-title" hidden>
+      <div class="card card-silver">
+        <header class="card-head">
+          <h2 id="pair-title">Pairing WhatsApp</h2>
+          <p>Masukkan nomor WhatsApp yang akan dijadikan bot, lengkap dengan kode negara.</p>
+        </header>
+
+        <form id="pair-form" novalidate>
+          <label class="label" for="number">Nomor WhatsApp</label>
+          <div class="field">
+            <span class="field-prefix" aria-hidden="true">+</span>
+            <input
+              id="number"
+              name="number"
+              type="tel"
+              inputmode="numeric"
+              autocomplete="tel"
+              placeholder="6281234567890"
+              maxlength="18"
+              aria-describedby="number-hint"
+              required
+            >
+          </div>
+          <p class="hint" id="number-hint">Contoh 6281234567890. Angka 0 di depan otomatis menjadi 62.</p>
+
+          <button type="submit" id="btn-pair" class="btn btn-silver btn-block">
+            <span id="btn-pair-label">Dapatkan Kode Pairing</span>
+          </button>
+        </form>
+
+        <div id="feedback" class="feedback" data-type="info" role="status" aria-live="polite" hidden></div>
+
+        <div id="result" class="result" hidden>
+          <p class="result-label">Kode pairing kamu</p>
+          <div class="code-box"><div id="code" class="code" aria-live="polite"></div></div>
+          <button type="button" id="btn-copy" class="btn btn-ghost btn-block">
+            <span id="btn-copy-label">Salin kode</span>
+          </button>
+
+          <ol class="how">
+            <li>Buka WhatsApp di ponsel dengan nomor tersebut.</li>
+            <li>Buka Pengaturan, lalu Perangkat tertaut.</li>
+            <li>Pilih Tautkan perangkat, lalu Tautkan dengan nomor telepon.</li>
+            <li>Masukkan kode di atas. Bot aktif otomatis setelah terhubung.</li>
+          </ol>
+        </div>
+
+        <button type="button" id="btn-back" class="btn btn-ghost btn-block btn-back">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>
+          <span>Kembali</span>
+        </button>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">Alyz Bot Web. Setiap nomor memakai sesi bot sendiri.</footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
