@@ -1,0 +1,20 @@
+# Opsional: Blueprint Render. Persistent Disk membutuhkan plan berbayar.
+services:
+  - type: web
+    name: alyz-bot
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    disk:
+      name: alyz-session
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: SESSION_DIR
+        value: /var/data/session
+      - key: OWNER_NUMBER
+        value: "6283176204764"
+      - key: LOG_LEVEL
+        value: info
+      - key: REMOVEBG_API_KEY
+        sync: false

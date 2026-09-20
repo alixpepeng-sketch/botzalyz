@@ -1,0 +1,26 @@
+{
+  "name": "alyz-bot",
+  "version": "1.0.0",
+  "description": "Alyz Bot Web - multi-bot hosting WhatsApp dengan pairing code tanpa QR",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "latest",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "pino": "^9.6.0",
+    "sharp": "^0.33.5"
+  },
+  "optionalDependencies": {
+    "ffmpeg-static": "^5.2.0"
+  },
+  "license": "MIT"
+}
