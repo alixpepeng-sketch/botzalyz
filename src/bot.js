@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
+import { fileURLToPath } from 'node:url';
 import {
   Browsers,
   DisconnectReason,
@@ -22,6 +23,9 @@ import {
   sleep,
 } from './utils.js';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const RATE_LIMIT_MS = 10_000;
 const RECONNECT_DELAY_MS = 3_000;
 const PAIRING_TTL_MS = 3 * 60_000;
@@ -37,9 +41,7 @@ const readyBySock = new WeakMap();
 const sessionPath = (number) => path.join(SESSION_DIR, number);
 const isLinked = (creds) => Boolean(creds?.registered || creds?.account);
 
-export function getStats() {
-  return { sessions: sessions.size };
-}
+export function getStats() { return { sessions: sessions.size }; }
 
 function dropSession(number, { wipe = false } = {}) {
   const sock = sessions.get(number);
@@ -50,37 +52,32 @@ function dropSession(number, { wipe = false } = {}) {
   try { sock?.end(undefined); } catch {}
   if (wipe) fs.rmSync(sessionPath(number), { recursive: true, force: true });
 }
-
 function scheduleReconnect(number) {
   if (reconnectTimers.has(number)) return;
   const timer = setTimeout(async () => {
     reconnectTimers.delete(number);
     if (!sessions.has(number)) return;
     try { await createSocket(number); } catch (err) {
-      logger.error({ err, number }, 'reconnect gagal, coba lagi');
+      logger.error({ err, number }, 'reconnect gagal');
       scheduleReconnect(number);
     }
   }, RECONNECT_DELAY_MS);
   reconnectTimers.set(number, timer);
 }
-
 function handleClose(number, sock, lastDisconnect) {
   if (sessions.get(number)!== sock) return;
   const statusCode = lastDisconnect?.error?.output?.statusCode;
-  logger.warn({ number, statusCode }, 'koneksi terputus');
   if (statusCode === DisconnectReason.loggedOut) return dropSession(number, { wipe: true });
   if (statusCode === DisconnectReason.connectionReplaced) return dropSession(number);
   if (!isLinked(sock.authState?.creds)) return dropSession(number, { wipe: true });
   scheduleReconnect(number);
 }
-
 let cachedVersion;
 async function getWaVersion() {
   if (cachedVersion) return cachedVersion;
   try { ({ version: cachedVersion } = await fetchLatestBaileysVersion()); } catch {}
   return cachedVersion;
 }
-
 async function createSocket(number) {
   const dir = sessionPath(number);
   initSessionFiles(dir);
@@ -106,33 +103,26 @@ async function createSocket(number) {
   sock.ev.on('messages.upsert', ({ messages, type }) => {
     if (type!== 'notify') return;
     for (const m of messages) {
-      handleMessage(sock, m, dir).catch((err) => logger.error({ err, number }, 'handleMessage gagal'));
+      handleMessage(sock, m, dir).catch((err) => logger.error({ err }, 'handleMessage gagal'));
     }
   });
   sock.ev.on('group-participants.update', (update) => {
-    handleParticipants(sock, update, dir).catch((err) => logger.error({ err, number }, 'welcome/leave gagal'));
+    handleParticipants(sock, update, dir).catch((err) => logger.error({ err }, 'welcome gagal'));
   });
   sessions.set(number, sock);
   if (!isLinked(state.creds)) {
     setTimeout(() => {
-      if (sessions.get(number) === sock &&!isLinked(sock.authState?.creds)) {
-        logger.info({ number }, 'pairing kedaluwarsa, sesi dibuang');
-        dropSession(number, { wipe: true });
-      }
+      if (sessions.get(number) === sock &&!isLinked(sock.authState?.creds)) dropSession(number, { wipe: true });
     }, PAIRING_TTL_MS).unref?.();
   }
   return sock;
 }
-
 function prepareDir(number) {
   const dir = sessionPath(number);
   const credsFile = path.join(dir, 'creds.json');
-  if (fs.existsSync(credsFile) &&!isLinked(readJson(credsFile, null))) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+  if (fs.existsSync(credsFile) &&!isLinked(readJson(credsFile, null))) fs.rmSync(dir, { recursive: true, force: true });
   ensureDir(dir);
 }
-
 function getSocket(number) {
   const existing = sessions.get(number);
   if (existing) return Promise.resolve(existing);
@@ -142,7 +132,6 @@ function getSocket(number) {
   starting.set(number, promise);
   return promise;
 }
-
 export async function restoreSessions() {
   ensureDir(SESSION_DIR);
   const entries = fs.readdirSync(SESSION_DIR, { withFileTypes: true });
@@ -150,24 +139,21 @@ export async function restoreSessions() {
     if (!entry.isDirectory() ||!/^\d{8,15}$/.test(entry.name)) continue;
     const creds = readJson(path.join(SESSION_DIR, entry.name, 'creds.json'), null);
     if (!isLinked(creds)) { fs.rmSync(sessionPath(entry.name), { recursive: true, force: true }); continue; }
-    try { await getSocket(entry.name); logger.info({ number: entry.name }, 'session dipulihkan'); } catch (err) { logger.error({ err, number: entry.name }, 'gagal memulihkan session'); }
+    try { await getSocket(entry.name); } catch {}
     await sleep(1000);
   }
 }
-
 function withTimeout(promise, ms, message) {
   let timer;
   const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
-
 async function requestPairing(sock, number) {
   await readyBySock.get(sock);
-  const raw = await withTimeout(sock.requestPairingCode(number), PAIRING_REQUEST_TIMEOUT_MS, 'requestPairingCode timeout');
+  const raw = await withTimeout(sock.requestPairingCode(number), PAIRING_REQUEST_TIMEOUT_MS, 'timeout');
   const clean = String(raw).replace(/[^A-Za-z0-9]/g, '').toUpperCase();
   return clean.match(/.{1,4}/g)?.join('-')?? clean;
 }
-
 const DEFAULT_WELCOME = 'Selamat datang @user di @group';
 const DEFAULT_LEAVE = 'Sampai jumpa @user';
 async function handleParticipants(sock, update, dir) {
@@ -187,53 +173,47 @@ async function handleParticipants(sock, update, dir) {
     await sock.sendMessage(groupJid, { text, mentions: [jid] });
   }
 }
-
 function rateLimiter(req, res, next) {
-  const ip = req.headers['cf-connecting-ip'] || req.ip || req.socket?.remoteAddress || 'unknown';
+  const ip = req.headers['cf-connecting-ip'] || req.ip || 'unknown';
   const now = Date.now();
   const wait = RATE_LIMIT_MS - (now - (rateLimit.get(ip) || 0));
-  if (wait > 0) {
-    const retryAfter = Math.ceil(wait / 1000);
-    res.set('Retry-After', String(retryAfter));
-    return res.status(429).json({ ok: false, message: `Terlalu cepat. Coba lagi dalam ${retryAfter} detik.`, retryAfter });
-  }
+  if (wait > 0) return res.status(429).json({ ok: false, message: `Coba lagi ${Math.ceil(wait/1000)} detik` });
   rateLimit.set(ip, now);
-  return next();
+  next();
 }
-
 async function pairHandler(req, res) {
   const number = normalizeNumber(req.body?.number);
-  if (!number) return res.status(400).json({ ok: false, message: 'Nomor tidak valid. Gunakan kode negara, contoh 6281234567890.' });
+  if (!number) return res.status(400).json({ ok: false, message: 'Nomor tidak valid' });
   try {
     let sock = sessions.get(number);
     if (!sock) {
-      if (sessions.size + starting.size >= MAX_SESSIONS) return res.status(503).json({ ok: false, message: 'Server sedang penuh. Coba lagi beberapa saat lagi.' });
+      if (sessions.size + starting.size >= MAX_SESSIONS) return res.status(503).json({ ok: false, message: 'Server penuh' });
       sock = await getSocket(number);
     }
-    if (isLinked(sock.authState?.creds)) return res.json({ ok: true, connected: true, message: 'Nomor ini sudah terhubung dan bot sudah aktif.' });
+    if (isLinked(sock.authState?.creds)) return res.json({ ok: true, connected: true, message: 'Sudah terhubung' });
     const code = await requestPairing(sock, number);
     return res.json({ ok: true, code });
   } catch (err) {
-    logger.error({ err, number }, 'pairing gagal');
+    logger.error({ err }, 'pairing gagal');
     const sock = sessions.get(number);
     if (sock &&!isLinked(sock.authState?.creds)) dropSession(number, { wipe: true });
-    return res.status(500).json({ ok: false, message: 'Gagal membuat kode pairing. Periksa nomor lalu coba lagi.' });
+    return res.status(500).json({ ok: false, message: 'Gagal buat code' });
   }
 }
-
 export function setupBot(app) {
   app.post('/pair', rateLimiter, pairHandler);
-  setInterval(() => {
-    const limit = Date.now() - RATE_LIMIT_MS;
-    for (const [ip, time] of rateLimit) if (time < limit) rateLimit.delete(ip);
-  }, 60_000).unref();
+  app.get('/stats', (req,res)=> res.json(getStats()));
 }
 
-// --- INI BUNTUTNYA BIAR NYAMBUNG & JALAN DI RENDER ---
+// --- SERVER UTAMA ---
 const app = express();
 app.use(express.json());
-app.get('/', (req, res) => res.send('Alyz bot jalan!'));
-app.get('/pair', (req, res) => res.send('POST ke /pair dengan body {number}'));
+app.use(express.static(path.join(__dirname, '../public')));
+app.get('/', (req, res) => {
+  const p = path.join(__dirname, '../public/index.html');
+  if(fs.existsSync(p)) return res.sendFile(p);
+  return res.send('Alyz Bot jalan, tapi public/index.html belum ada');
+});
 setupBot(app);
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server jalan di port ${PORT}`));
