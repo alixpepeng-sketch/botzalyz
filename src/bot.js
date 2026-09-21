@@ -1,174 +1,233 @@
-import makeWASocket, {
-  useMultiFileAuthState,
+import fs from 'node:fs';
+import path from 'node:path';
+import {
+  Browsers,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  Browsers
-} from '@whiskeysockets/baileys';
-import fs from 'node:fs/promises';
-import { config } from './config.js';
-import { baileysLogger, log } from './logger.js';
+  makeCacheableSignalKeyStore,
+  makeWASocket,
+  useMultiFileAuthState,
+} from './baileys.js';
+import { MAX_SESSIONS, SESSION_DIR } from './config.js';
 import { handleMessage } from './handler.js';
+import { baileysLogger, logger, log } from './logger.js';
+import {
+  ensureDir,
+  initSessionFiles,
+  isBotParticipant,
+  normalizeNumber,
+  numberOf,
+  readJson,
+  sleep,
+} from './utils.js';
 
-export class PairError extends Error {
-  constructor(message, status = 400) {
-    super(message);
-    this.status = status;
-  }
+const RATE_LIMIT_MS = 10_000;
+const RECONNECT_DELAY_MS = 3_000;
+const PAIRING_TTL_MS = 3 * 60_000;
+const READY_TIMEOUT_MS = 10_000;
+const PAIRING_REQUEST_TIMEOUT_MS = 30_000;
+
+const sessions = new Map();
+const starting = new Map();
+const reconnectTimers = new Map();
+const rateLimit = new Map();
+const readyBySock = new WeakMap();
+
+const sessionPath = (number) => path.join(SESSION_DIR, number);
+const isLinked = (creds) => Boolean(creds?.registered || creds?.account);
+
+export function getStats() {
+  return { sessions: sessions.size, max: MAX_SESSIONS };
+}
+export const stats = getStats;
+
+function dropSession(number, { wipe = false } = {}) {
+  const sock = sessions.get(number);
+  sessions.delete(number);
+  const timer = reconnectTimers.get(number);
+  if (timer) clearTimeout(timer);
+  reconnectTimers.delete(number);
+  try { sock?.end(undefined); } catch {}
+  if (wipe) fs.rmSync(sessionPath(number), { recursive: true, force: true });
 }
 
-const state = { status: 'idle', pairing: false };
-let sock = null;
-let starting = false;
-let reconnectTimer = null;
-let pairReady = false;
-let pairWaiters = [];
-
-export function getStatus() {
-  return {
-    status: state.status,
-    connected: state.status === 'open',
-    registered: Boolean(sock?.authState?.creds?.registered)
-  };
+function scheduleReconnect(number) {
+  if (reconnectTimers.has(number)) return;
+  const timer = setTimeout(async () => {
+    reconnectTimers.delete(number);
+    if (!sessions.has(number)) return;
+    try { await createSocket(number); }
+    catch (err) {
+      logger.error({ err, number }, 'reconnect gagal, coba lagi');
+      scheduleReconnect(number);
+    }
+  }, RECONNECT_DELAY_MS);
+  reconnectTimers.set(number, timer);
 }
 
-export function normalizeNumber(raw) {
-  let n = String(raw ?? '').replace(/\D/g, '');
-  if (n.startsWith('0')) n = '62' + n.slice(1);
-  if (n.length < 8 || n.length > 15) {
-    throw new PairError('Nomor tidak valid. Gunakan kode negara, contoh 628123456789.', 400);
-  }
-  return n;
+function handleClose(number, sock, lastDisconnect) {
+  if (sessions.get(number)!== sock) return;
+  const statusCode = lastDisconnect?.error?.output?.statusCode;
+  logger.warn({ number, statusCode }, 'koneksi terputus');
+  if (statusCode === DisconnectReason.loggedOut) { dropSession(number, { wipe: true }); return; }
+  if (statusCode === DisconnectReason.connectionReplaced) { dropSession(number); return; }
+  if (!isLinked(sock.authState?.creds)) { dropSession(number, { wipe: true }); return; }
+  scheduleReconnect(number);
 }
 
-function markPairReady() {
-  pairReady = true;
-  const waiters = pairWaiters;
-  pairWaiters = [];
-  waiters.forEach((fn) => fn());
+let cachedVersion;
+async function getWaVersion() {
+  if (cachedVersion) return cachedVersion;
+  try { ({ version: cachedVersion } = await fetchLatestBaileysVersion()); } catch {}
+  return cachedVersion;
 }
 
-function waitForPairReady(timeoutMs = 15_000) {
-  if (pairReady) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const done = () => {
-      clearTimeout(timer);
-      resolve(true);
-    };
-    const timer = setTimeout(() => {
-      pairWaiters = pairWaiters.filter((fn) => fn !== done);
-      resolve(false);
-    }, timeoutMs);
-    pairWaiters.push(done);
+async function createSocket(number) {
+  const dir = sessionPath(number);
+  initSessionFiles(dir);
+  const { state, saveCreds } = await useMultiFileAuthState(dir);
+  const sock = makeWASocket({
+    version: await getWaVersion(),
+    logger: baileysLogger,
+    auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, baileysLogger) },
+    browser: Browsers.ubuntu('Chrome'),
+    markOnlineOnConnect: false,
+    syncFullHistory: false,
+    generateHighQualityLinkPreview: false,
   });
-}
-
-export async function requestPairing(number) {
-  if (!sock) throw new PairError('Bot belum siap, coba lagi sebentar.', 503);
-  if (sock.authState.creds.registered) {
-    throw new PairError('Bot sudah tersambung ke sebuah akun WhatsApp.', 409);
-  }
-  if (state.pairing) throw new PairError('Permintaan kode lain sedang diproses.', 429);
-
-  state.pairing = true;
-  try {
-    const current = sock;
-    await waitForPairReady();
-    if (current !== sock) throw new PairError('Koneksi sedang dimulai ulang, coba lagi.', 503);
-    const code = await current.requestPairingCode(number);
-    return String(code).replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-  } catch (err) {
-    if (err instanceof PairError) throw err;
-    log.error({ err }, 'requestPairingCode gagal');
-    throw new PairError('Gagal meminta kode. Periksa nomor lalu coba lagi.', 500);
-  } finally {
-    state.pairing = false;
-  }
-}
-
-function scheduleReconnect() {
-  if (reconnectTimer) return;
-  log.info(`Menyambung ulang dalam ${config.reconnectDelayMs / 1000} detik`);
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    startBot();
-  }, config.reconnectDelayMs);
-}
-
-async function onConnectionUpdate(current, update) {
-  if (current !== sock) return;
-  const { connection, lastDisconnect, qr } = update;
-
-  // Event qr menandakan handshake selesai, socket siap menerima permintaan pairing code
-  if (qr) markPairReady();
-
-  if (connection === 'connecting') state.status = 'connecting';
-
-  if (connection === 'open') {
-    state.status = 'open';
-    markPairReady();
-    log.info('WhatsApp tersambung');
-  }
-
-  if (connection === 'close') {
-    const code = lastDisconnect?.error?.output?.statusCode;
-    state.status = 'closed';
-    pairReady = false;
-    log.warn({ code }, 'Koneksi tertutup');
-
-    if (code === DisconnectReason.loggedOut) {
-      // Sesi dicabut dari ponsel: hapus sesi lama supaya bisa pairing ulang lewat web
-      state.status = 'logged_out';
-      await fs.rm(config.sessionDir, { recursive: true, force: true }).catch(() => {});
-      log.warn('Sesi dihapus, silakan pairing ulang lewat web');
+  let markReady;
+  readyBySock.set(sock, new Promise((resolve) => { markReady = resolve; setTimeout(resolve, READY_TIMEOUT_MS).unref?.(); }));
+  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect, qr } = update;
+    if (qr || connection === 'open') markReady();
+    if (connection === 'open') logger.info({ number }, 'bot terhubung');
+    if (connection === 'close') handleClose(number, sock, lastDisconnect);
+  });
+  sock.ev.on('messages.upsert', ({ messages, type }) => {
+    if (type!== 'notify') return;
+    for (const m of messages) {
+      handleMessage(sock, m, dir).catch((err) => logger.error({ err, number }, 'handleMessage gagal'));
     }
-    scheduleReconnect();
-  }
-}
-
-export async function startBot() {
-  if (starting) return;
-  starting = true;
-  try {
-    await fs.mkdir(config.sessionDir, { recursive: true });
-    const { state: auth, saveCreds } = await useMultiFileAuthState(config.sessionDir);
-
-    let version;
-    try {
-      ({ version } = await fetchLatestBaileysVersion());
-    } catch {
-      /* pakai versi bawaan Baileys */
-    }
-
-    pairReady = false;
-    state.status = 'connecting';
-
-    const current = makeWASocket({
-      auth,
-      ...(version ? { version } : {}),
-      logger: baileysLogger,
-      browser: Browsers.ubuntu('Chrome'),
-      printQRInTerminal: false,
-      markOnlineOnConnect: false,
-      syncFullHistory: false,
-      generateHighQualityLinkPreview: false
-    });
-    sock = current;
-
-    current.ev.on('creds.update', saveCreds);
-    current.ev.on('connection.update', (u) =>
-      onConnectionUpdate(current, u).catch((err) => log.error({ err }, 'connection.update error'))
-    );
-    current.ev.on('messages.upsert', ({ messages, type }) => {
-      if (type !== 'notify' || current !== sock) return;
-      for (const m of messages) {
-        handleMessage(current, m).catch((err) => log.error({ err }, 'handler error'));
+  });
+  sock.ev.on('group-participants.update', (update) => {
+    handleParticipants(sock, update, dir).catch((err) => logger.error({ err, number }, 'welcome/leave gagal'));
+  });
+  sessions.set(number, sock);
+  if (!isLinked(state.creds)) {
+    setTimeout(() => {
+      if (sessions.get(number) === sock &&!isLinked(sock.authState?.creds)) {
+        logger.info({ number }, 'pairing kedaluwarsa, sesi dibuang');
+        dropSession(number, { wipe: true });
       }
-    });
-  } catch (err) {
-    log.error({ err }, 'startBot gagal');
-    scheduleReconnect();
-  } finally {
-    starting = false;
+    }, PAIRING_TTL_MS).unref?.();
   }
+  return sock;
+}
+
+function prepareDir(number) {
+  const dir = sessionPath(number);
+  const credsFile = path.join(dir, 'creds.json');
+  if (fs.existsSync(credsFile) &&!isLinked(readJson(credsFile, null))) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  ensureDir(dir);
+}
+
+function getSocket(number) {
+  const existing = sessions.get(number);
+  if (existing) return Promise.resolve(existing);
+  if (starting.has(number)) return starting.get(number);
+  prepareDir(number);
+  const promise = createSocket(number).finally(() => starting.delete(number));
+  starting.set(number, promise);
+  return promise;
+}
+
+export async function restoreSessions() {
+  ensureDir(SESSION_DIR);
+  const entries = fs.readdirSync(SESSION_DIR, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory() ||!/^\d{8,15}$/.test(entry.name)) continue;
+    const creds = readJson(path.join(SESSION_DIR, entry.name, 'creds.json'), null);
+    if (!isLinked(creds)) { fs.rmSync(sessionPath(entry.name), { recursive: true, force: true }); continue; }
+    try { await getSocket(entry.name); logger.info({ number: entry.name }, 'session dipulihkan'); }
+    catch (err) { logger.error({ err, number: entry.name }, 'gagal memulihkan session'); }
+    await sleep(1000);
+  }
+}
+
+function withTimeout(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function requestPairing(sock, number) {
+  await readyBySock.get(sock);
+  const raw = await withTimeout(sock.requestPairingCode(number), PAIRING_REQUEST_TIMEOUT_MS, 'requestPairingCode timeout');
+  const clean = String(raw).replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  return clean.match(/.{1,4}/g)?.join('-')?? clean;
+}
+
+const DEFAULT_WELCOME = 'Selamat datang @user di @group';
+const DEFAULT_LEAVE = 'Sampai jumpa @user';
+
+async function handleParticipants(sock, update, dir) {
+  const { id: groupJid, participants, action } = update;
+  if (action!== 'add' && action!== 'remove') return;
+  const config = readJson(path.join(dir, 'welcome.json'), {});
+  const isWelcome = action === 'add';
+  if (isWelcome? config.welcomeEnabled!== true : config.leaveEnabled!== true) return;
+  const template = (isWelcome? config.welcomeText : config.leaveText) || (isWelcome? DEFAULT_WELCOME : DEFAULT_LEAVE);
+  let subject = '';
+  try { subject = (await sock.groupMetadata(groupJid)).subject || ''; } catch {}
+  for (const participant of participants || []) {
+    if (typeof participant === 'object' && isBotParticipant(sock, participant)) continue;
+    const jid = typeof participant === 'string'? participant : participant.phoneNumber || participant.id;
+    if (!jid) continue;
+    const text = template.replace(/@user/gi, `@${numberOf(jid)}`).replace(/@group/gi, subject);
+    await sock.sendMessage(groupJid, { text, mentions: [jid] });
+  }
+}
+
+function rateLimiter(req, res, next) {
+  const ip = req.headers['cf-connecting-ip'] || req.ip || req.socket?.remoteAddress || 'unknown';
+  const now = Date.now();
+  const wait = RATE_LIMIT_MS - (now - (rateLimit.get(ip) || 0));
+  if (wait > 0) {
+    const retryAfter = Math.ceil(wait / 1000);
+    res.set('Retry-After', String(retryAfter));
+    return res.status(429).json({ ok: false, message: `Terlalu cepat. Coba lagi dalam ${retryAfter} detik.`, retryAfter });
+  }
+  rateLimit.set(ip, now);
+  return next();
+}
+
+async function pairHandler(req, res) {
+  const number = normalizeNumber(req.body?.number);
+  if (!number) return res.status(400).json({ ok: false, message: 'Nomor tidak valid. Gunakan kode negara, contoh 6281234567890.' });
+  try {
+    let sock = sessions.get(number);
+    if (!sock) {
+      if (sessions.size + starting.size >= MAX_SESSIONS) return res.status(503).json({ ok: false, message: 'Server sedang penuh. Coba lagi beberapa saat lagi.' });
+      sock = await getSocket(number);
     }
-                        
+    if (isLinked(sock.authState?.creds)) return res.json({ ok: true, connected: true, message: 'Nomor ini sudah terhubung dan bot sudah aktif.' });
+    const code = await requestPairing(sock, number);
+    return res.json({ ok: true, code });
+  } catch (err) {
+    logger.error({ err, number }, 'pairing gagal');
+    const sock = sessions.get(number);
+    if (sock &&!isLinked(sock.authState?.creds)) dropSession(number, { wipe: true });
+    return res.status(500).json({ ok: false, message: 'Gagal membuat kode pairing. Periksa nomor lalu coba lagi.' });
+  }
+}
+
+export function setupBot(app) {
+  app.post('/pair', rateLimiter, pairHandler);
+  setInterval(() => {
+    const limit = Date.now() - RATE_LIMIT_MS;
+    for (const [ip, time] of rateLimit) if (time < limit) rateLimit.delete(ip);
+  }, 60_000).unref();
+    }
