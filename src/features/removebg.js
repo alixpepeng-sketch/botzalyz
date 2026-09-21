@@ -21,7 +21,7 @@ function readApiError(err) {
 
 // .removebg - reply foto (atau upload foto dengan caption .removebg).
 export default async function removebg(sock, m) {
-  const apiKey = process.env.ZJZha9WH7xtVuVZueDN6twCy;
+  const apiKey = process.env.REMOVE_BG_API_KEY;
   if (!apiKey) {
     return reply(sock, m, 'Fitur removebg belum aktif: REMOVEBG_API_KEY belum diisi di server.');
   }
